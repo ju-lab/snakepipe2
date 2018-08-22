@@ -1,0 +1,54 @@
+reference: /home/users/data/01_reference/human_g1k_v37/human_g1k_v37.fasta
+
+# basic languages
+java8: /home/users/cjyoon/tools/jdk1.8.0_171/bin/java
+java7: /home/users/cjyoon/tools/jdk1.7.0_80/bin/java
+python3: /home/users/cjyoon/anaconda3/bin/python
+python2: /home/users/cjyoon/anaconda3/envs/py27/bin/python
+
+# bam processing
+picard: /home/users/tools/picard/dist/picard.jar
+gatk: /home/users/cjyoon/tools/GenomeAnalysisTK-3.8-1/GenomeAnalysisTK.jar
+samtools: /home/users/cjyoon/anaconda3/bin/samtools
+bwa: /home/users/cjyoon/anaconda3/bin/bwa
+knownindel: /home/users/data/02_annotation/01_GATK/01_golden_standard/Mills_and_1000G_gold_standard.indels.b37.vcf
+dbsnp: /home/users/data/02_annotation/01_GATK/02_db_snp/dbsnp_138.b37.vcf
+cosmic: /home/users/data/02_annotation/03_mutect/cosmic_v71_141209.vcf
+dbsnp_mutect: /home/users/data/02_annotation/03_mutect/dbsnp_132_b37.leftAligned.vcf  
+sambamba: /home/users/cjyoon/anaconda3/bin/sambamba
+samblaster: /home/users/cjyoon/bin/samblaster
+# snv variant callers
+mutect: /home/users/tools/mutect/mutect-1.1.7.jar
+varscan: /home/users/cjyoon/anaconda3/share/varscan-2.4.3-0/VarScan.jar
+strelka: /home/users/cjyoon/anaconda3/envs/py27/share/strelka-2.8.4-0/bin/configureStrelkaSomaticWorkflow.py
+
+freebayes_parallel: scripts/freebayes-parallel
+fasta_generate_regions: scripts/fasta_generate_regions.py # for splitting ref in order to parallelize
+
+
+# sv variant callers
+delly: /home/users/tools/delly-parallel/delly_v0.7.8_parallel_linux_x86_64bit
+dellymask: /home/users/cjyoon/tools/delly/excludeTemplates/human.hg19.excl.tsv
+manta: /home/users/cjyoon/anaconda3/envs/py27/share/manta-1.2.1-0/bin/configManta.py
+
+# cnv variant callers
+sequenza_utils: /home/users/cjyoon/anaconda3/bin/sequenza-utils
+Rscript: /home/users/cjyoon/anaconda3/bin/Rscript
+run_sequenza: scripts/run_sequenza.R
+gc50base_ref: /home/users/data/01_reference/human_g1k_v37/human_g1k_v37_noM.gc50Base.txt.gz
+
+#abscn
+getcoverage: scripts/01_get_coverage.py 
+calculate_stats: scripts/02_calculate_stats.py
+calculate_abscn: scripts/03_report_Tspecific_absolute_CN.py
+
+# variant filters
+passFilter: scripts/passFilter
+vcfallelicprimitives: /home/users/cjyoon/anaconda3/bin/vcfallelicprimitives
+vt: /home/users/cjyoon/anaconda3/bin/vt
+bcftools: /home/users/cjyoon/anaconda3/bin/bcftools
+bgzip: /home/users/cjyoon/anaconda3/bin/bgzip
+tabix: /home/users/cjyoon/anaconda3/bin/tabix
+
+# variant annotator
+vep: /home/users/cjyoon/ensembl-vep/vep

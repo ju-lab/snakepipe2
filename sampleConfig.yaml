@@ -1,0 +1,16 @@
+id:
+    TC_1_GA1:
+        tumor: TC_1_GA1
+        normal: TC_1_GB
+    TC_1_GD1:
+        tumor: TC_1_GD1
+        normal: TC_1_GB
+    TC_1_GP1:
+        tumor: TC_1_GP1
+        normal: TC_1_GB
+    TC_1_GS1:
+        tumor: TC_1_GS1
+        normal: TC_1_GB
+    TC_1_GT:
+        tumor: TC_1_GT
+        normal: TC_1_GB

@@ -1,0 +1,430 @@
+# Snakefile to run FASTQ -> Processed BAM -> basic somatic variant calling (SNV, SV, and CNV)
+# 2018.06.03 Jongsoo Yoon
+# 2018.08.06 CJY updated to take sample table (instead of yaml), testing with tongue cancer fastq files
+# 2018.08.20 CJY updated to run absolute copy number calculation as well, using delly_parallel, freebayes calls
+configfile: 'pathConfig.yaml'
+configfile: 'sampleConfig.yaml'
+
+# Identify FASTQ file samples in the fastq folder
+import os
+import re
+SAMPLES = list(set([ re.sub(r'_R[0-9]+.fastq.gz', '', i) for i in os.listdir('./dna_fastq') if i.endswith('fastq.gz')]))
+
+
+rule all:
+    input:
+        "done"
+
+
+rule bwa_align:
+    params:
+        rg = "@RG\tID:{sample}\tSM:{sample}\tPL:Illumina", 
+    input:
+        bwa = config['bwa'],
+        samtools = config['samtools'],
+        samblaster = config['samblaster'],
+        ref = config['reference'],
+        fq1 = 'dna_fastq/{sample}_R1.fastq.gz', 
+        fq2 = 'dna_fastq/{sample}_R2.fastq.gz',
+    output:
+        bam = "temp_dna/{sample}.temp.bam", 
+    log:
+        "logs/{sample}_T.bwa.log"
+    threads: 4
+    shell:
+        "({input.bwa} mem -t {threads} -R '{params.rg}' {input.ref} {input.fq1} {input.fq2} |"
+        "{input.samblaster} | "
+        "{input.samtools} view -Sb - > {output.bam}) "
+        "&> {log}"
+
+rule sort:
+    input:
+        sambamba = config['sambamba'], 
+        samtools = config['samtools'],
+        aligned_bam = 'temp_dna/{sample}.temp.bam'
+    output:
+        sorted_bam = 'temp_dna/{sample}.temp.sorted.bam'
+    log:
+        "logs/{sample}.sort.log"
+    threads: 4
+    shell:
+        "({input.sambamba} sort -p -m 8GB --tmpdir=temp_dna -t {threads} -o {output.sorted_bam} {input.aligned_bam}) "
+#        "({input.samtools} sort -@ {threads} -o {output.sorted_bam} {input.aligned_bam})"
+        "&> {log}"
+
+
+rule realign:
+    input:
+        java = config['java8'],
+        gatk = config['gatk'],
+        samtools = config['samtools'],
+        ref = config['reference'], 
+        knownindel = config['knownindel'], 
+        bam = "temp_dna/{sample}.temp.sorted.bam", 
+
+    output:
+        realignedbam = temp("temp_dna/{sample}.temp.sorted.ir.bam"),
+        realignedbai = temp("temp_dna/{sample}.temp.sorted.ir.bam.bai"), 
+        realign_target = "temp_dna/{sample}.temp.sorted.ir.bam.intervals"
+    threads: 1
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 4000
+    log:
+        "logs/{sample}.realign.log"
+    shell:
+        "({input.java} -Xmx4g -jar {input.gatk} -T RealignerTargetCreator -R {input.ref} "
+        " -I {input.bam} --known {input.knownindel} -o {output.realign_target}; "
+        "{input.java} -Xmx4g -jar {input.gatk} -T IndelRealigner -R {input.ref} -I {input.bam} "
+        "-known {input.knownindel} "
+        "-targetIntervals {output.realign_target} -o {output.realignedbam}; "
+        "{input.samtools} index {output.realignedbam}) &> {log}"
+
+
+rule baserecal:
+    input:
+        java = config['java8'], 
+        gatk = config['gatk'], 
+        sambamba = config['sambamba'],
+        ref = config['reference'], 
+        dbsnp = config['dbsnp'], 
+        knownindel = config['knownindel'], 
+        bam = "temp_dna/{sample}.temp.sorted.ir.bam"
+    output:
+        recalTable = temp('temp_dna/{sample}.recaltable'),
+        recalbam = "dna_bam/{sample}.bam"
+    threads: 1
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 4000
+    log:
+        "logs/{sample}.baserecal.log"
+    shell:
+        "({input.java} -Xmx4g -jar {input.gatk} -T BaseRecalibrator -R {input.ref} -I {input.bam} -knownSites {input.dbsnp} --knownSites {input.knownindel} -o {output.recalTable}; "
+        "{input.java} -Xmx4g -jar {input.gatk} -T PrintReads -R {input.ref} -I {input.bam} -BQSR {output.recalTable} -o {output.recalbam} -nct {threads}; "
+        "{input.sambamba} index {output.recalbam}) &> {log}"
+
+# rule varscan:
+#     input:
+#         tumor_mpileup = 'mpileup/{sample}_T.mpileup', 
+#         normal_mpileup = 'mpileup/{sample}_N.mpileup',
+#         varscan = config['varscan'], 
+#         java = config['java8'], 
+#     output:
+#         snvvcf = 'data_processing/varscan/{sample}.varscan.snp.vcf', 
+#         indelvcf = 'data_processing/varscan/{sample}.varscan.indel.vcf'
+#     threads: 1
+#     params:
+#         basename = 'data_processing/varscan/{sample}.varscan'
+#     shell:
+#         "{input.java} -jar  {input.varscan} somatic {input.normal_mpileup} {input.tumor_mpileup} {params.basename} --output-vcf 1 --strand-filter 1"
+
+rule manta:
+    input:
+        python2 = config['python2'], 
+        manta = config['manta'], 
+        normal_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['normal'] + '.bam', 
+        tumor_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['tumor'] + '.bam', 
+        ref = config['reference']
+    params:
+        rundir = 'data_processing/manta/{id}', 
+        workflow = 'data_processing/manta/{id}/runWorkflow.py'
+    threads: 4
+    output: 
+        candidateSmallIndel = 'data_processing/manta/{id}/results/variants/candidateSmallIndels.vcf.gz', 
+        somaticSV_vcf = 'data_processing/manta/{id}/results/variants/somaticSV.vcf.gz'
+    log:
+        "logs/{id}.manta.log"
+    shell:
+        "({input.python2} {input.manta} --normalBam {input.normal_bam} --tumorBam {input.tumor_bam} "
+        "--referenceFasta {input.ref} --runDir {params.rundir}; "
+        "{input.python2} {params.workflow} -m local -j {threads} --quiet) &> {log}"
+
+
+rule mutect:
+    input:
+        java = config['java7'],
+        mutect = config['mutect'],
+        reference = config['reference'], 
+        cosmic = config['cosmic'], 
+        dbsnp = config['dbsnp_mutect'], 
+        normal_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['normal'] + '.bam', 
+        tumor_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['tumor'] + '.bam', 
+
+    output:
+        vcf = 'data_processing/mutect/{id}.mutect.vcf', 
+        out = 'data_processing/mutect/{id}.mutect.out'
+    threads: 1
+    log:
+        "logs/{id}.mutect.log"
+    shell:
+        "({input.java} -jar {input.mutect} --analysis_type MuTect --only_passing_calls "
+        "--reference_sequence {input.reference} --cosmic {input.cosmic} --dbsnp {input.dbsnp} "
+        "--input_file:normal {input.normal_bam} --input_file:tumor {input.tumor_bam} "
+        " --vcf {output.vcf} --out {output.out}) &> {log}"
+
+rule strelka:
+    input:
+        python2 = config['python2'], 
+        strelka = config['strelka'],
+        ref  = config['reference'], 
+        manta_indel_candidate = 'data_processing/manta/{id}/results/variants/candidateSmallIndels.vcf.gz', 
+        normal_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['normal'] + '.bam', 
+        tumor_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['tumor'] + '.bam', 
+    params:
+        rundir = 'data_processing/strelka/{id}', 
+        workflow = 'data_processing/strelka/{id}/runWorkflow.py'
+    output: 
+        snvvcf = 'data_processing/strelka/{id}/results/variants/somatic.snvs.vcf.gz', 
+        indelvcf = 'data_processing/strelka/{id}/results/variants/somatic.indels.vcf.gz'
+    threads: 4
+    log:
+        "logs/{id}.strelka.log"
+    shell:
+        "({input.python2} {input.strelka} --normalBam {input.normal_bam} --tumorBam {input.tumor_bam} "
+        "--referenceFasta {input.ref} --indelCandidates {input.manta_indel_candidate} --runDir {params.rundir}; "
+        "{input.python2} {params.workflow} -m local -j {threads} --quiet) &> {log}"
+
+import pysam 
+import yaml
+
+#function for delly_step12 and freebayes
+def sampleNameBam(bamFile):
+    """get @RG SM: information as sample name from BAM header"""
+    bam = pysam.AlignmentFile(bamFile)
+    name = bam.header['RG'][0]['SM']
+    return name
+
+
+rule delly_step12:
+    input:
+        delly = config['delly'], 
+        dellymask = config['dellymask'], 
+        reference = config['reference'], 
+        normal_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['normal'] + '.bam', 
+        tumor_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['tumor'] + '.bam',         
+    output:
+        initial_call = 'data_processing/delly/initial_call/{id}.bcf', 
+        somatic_prefilter = 'data_processing/delly/filtered/{id}.pre.bcf', 
+        sample_tsv = 'data_processing/delly/sample_tsv/{id}.tsv'
+
+    threads: 2
+    log:
+        log1 = "logs/{id}.delly_step1.log", 
+        log2 = "logs/{id}.delly_step2.log"
+    run:
+        normal_name = sampleNameBam(input.normal_bam)
+        tumor_name = sampleNameBam(input.tumor_bam)
+        with open(output.sample_tsv, 'w') as f:
+            f.write(tumor_name + '\t' + 'tumor\n')
+            f.write(normal_name + '\t' + 'control')
+
+        shell("({input.delly} call -n -q 15 -x {input.dellymask} -o {output.initial_call} -g {input.reference} {input.tumor_bam} {input.normal_bam}) &> {log.log1}")
+        shell("({input.delly} filter -f somatic -o {output.somatic_prefilter} -s {output.sample_tsv} {output.initial_call}) &> {log.log2}")
+
+# function for rule delly_step34
+def get_all_normalBam():
+    with open('sampleConfig.yaml', 'r') as stream:
+        data_loaded = yaml.load(stream)
+    normal_list = [] 
+    for id, tn in data_loaded['id'].items():
+        normalBam = os.path.join('dna_bam/', tn['normal'] + '.bam')
+        normal_list.append(normalBam)
+
+    return list(set(normal_list))
+
+rule delly_step34:
+    input:
+        delly = config['delly'],
+        reference = config['reference'], 
+        dellymask = config['dellymask'], 
+        tumor_bam = lambda wildcards: 'dna_bam/' + config['id'][wildcards.id]['tumor'] + '.bam', 
+        somatic_prefilter = 'data_processing/delly/filtered/{id}.pre.bcf', 
+        sample_tsv = 'data_processing/delly/sample_tsv/{id}.tsv'
+
+    output:
+        genobcf = 'data_processing/delly/genotyped/{id}.geno.bcf', 
+        somaticbcf = 'data_processing/delly/genotyped/{id}.somatic.bcf', 
+        somaticvcf = 'data_processing/delly/genotyped/{id}.somatic.vcf.gz', 
+
+    threads: 2
+    log:
+        log3 = "logs/{id}.delly_step3.log", 
+        log4 = "logs/{id}.delly_step4.log"
+    run:
+        normal_bam_list = get_all_normalBam()
+        normal_bam_string = ' '.join(normal_bam_list)
+        shell("({input.delly} call -n -q 15 -g {input.reference} -v {input.somatic_prefilter} -o {output.genobcf} -x {input.dellymask} {input.tumor_bam} {normal_bam_string}) &> {log.log3}")
+        shell("({input.delly} filter -f somatic -o {output.somaticbcf} -s {input.sample_tsv} {output.genobcf}) &> {log.log4}")
+        shell("{input.bcftools} view -O z -o {output.somaticvcf} {output.somaticbcf}")
+        shell("{input.tabix} -p vcf {output.somaticvcf}")
+
+rule mpileup:
+    input: 
+        bam = 'dna_bam/{sample}.bam', 
+        samtools = config['samtools'], 
+        reference = config['reference']
+    output: 
+        mpileup = 'data_processing/mpileup/{sample}.bam.mpileup.gz'
+    threads: 1
+    log:
+        "logs/{sample}.mpileup.log"
+    shell:
+        "({input.samtools} mpileup -B -Q 20 -q 20 -f {input.reference} {input.bam} | gzip -f > {output.mpileup}) &> {log}"
+
+
+
+rule sequenza:
+    input:
+        sequenza_utils = config['sequenza_utils'], 
+        Rscript = config['Rscript'], 
+        run_sequenza = config['run_sequenza'], 
+        normal_mpileup = lambda wildcards: 'data_processing/mpileup/' + config['id'][wildcards.id]['normal'] + '.bam.mpileup.gz', 
+        tumor_mpileup = lambda wildcards: 'data_processing/mpileup/' + config['id'][wildcards.id]['tumor'] + '.bam.mpileup.gz', 
+        gc50base_ref = config['gc50base_ref']
+    output:
+        seqz = 'data_processing/sequenza/{id}/{id}.seqz', 
+        comp_seqz ='data_processing/sequenza/{id}/{id}.comp.seqz', 
+        rmGLMT = 'data_processing/sequenza/{id}/{id}.comp.seqz.rmGLMT', 
+        sequenza_input = 'data_processing/sequenza/{id}/{id}.comp.seqz.rmGLMT.gz', 
+        sequenza_output = 'data_processing/sequenza/{id}/{id}_genome_view.pdf'
+    params:
+        outputdir = 'data_processing/sequenza/{id}',
+        sampleName = '{id}'
+    threads: 1
+    log:
+        "logs/{id}.sequenza.log"
+    shell:
+        "({input.sequenza_utils} bam2seqz -gc {input.gc50base_ref} -n {input.normal_mpileup} -t {input.tumor_mpileup} "
+        "--pileup -o {output.seqz}; "
+        "{input.sequenza_utils} seqz_binning --window 100 --seqz {output.seqz} -o {output.comp_seqz}; "
+        "cat {output.comp_seqz} | grep -v MT | grep -v GL > {output.rmGLMT}; "
+        "gzip -c {output.rmGLMT} > {output.sequenza_input}; "
+        "{input.Rscript} {input.run_sequenza} --seqz_file {output.sequenza_input} -o {params.outputdir} -s {params.sampleName}) &> {log}"
+
+# functions for rule abscn
+def parse_sequenza_output(sequenza_output):
+    """extracts aberrant cell fraction and ploidy from sequenza output"""
+    with open(sequenza_output, 'r') as f:
+        for i, line in enumerate(f):
+            if i==2: # read third line (first line is header, second line is confidence interval boundary)
+                acf, ploidy, ploidy_mean_cn = line.strip().split()
+
+    return acf, ploidy
+
+def parse_100kb_stat(binning_stat_file):
+    """extracts average depth from 100kbcov.covstat file"""
+    with open(binning_stat_file, 'r') as f:
+        for i, line in enumerate(f):
+            if i==1: # read second line (first line is header)
+                filename, region, throughput, avg_depth = line.strip().split()
+                return avg_depth
+
+
+rule abscn_step1:
+    input:
+        python2 = config['python2'],
+        mpileup = 'data_processing/mpileup/{sample}.bam.mpileup.gz', 
+        getcoverage = config['getcoverage'],
+        calculate_stats = config['calculate_stats']
+    output:
+        cov_output = 'data_processing/mpileup/{sample}.bam.mpileup.100kbcov', 
+        cov_statoutput = 'data_processing/mpileup/{sample}.bam.mpileup.100kbcov.covstat', 
+
+    threads: 1
+    log:
+        "logs/{sample}.abscn_step1.log"
+    shell:
+        "({input.python2} {input.getcoverage} {input.mpileup}; "
+        "{input.python2} {input.calculate_stats} {output.cov_output}) &> {log}" 
+
+rule abscn_step2:
+    input:
+        python2 = config['python2'], 
+        calculate_abscn = config['calculate_abscn'], 
+        sequenza_purityploidy = 'data_processing/sequenza/{id}/{id}_confints_CP.txt', 
+        normal_100kb_stat = lambda wildcards: 'data_processing/mpileup/' + config['id'][wildcards.id]['normal'] + '.bam.mpileup.100kbcov.covstat', 
+        tumor_100kb_stat = lambda wildcards: 'data_processing/mpileup/' + config['id'][wildcards.id]['tumor'] + '.bam.mpileup.100kbcov.covstat', 
+        normal_100kb_cov = lambda wildcards: 'data_processing/mpileup/' + config['id'][wildcards.id]['normal'] + '.bam.mpileup.100kbcov', 
+        tumor_100kb_cov = lambda wildcards: 'data_processing/mpileup/' + config['id'][wildcards.id]['tumor'] + '.bam.mpileup.100kbcov',
+
+    output:
+        cov_output = 'data_processing/mpileup/{id}.bam.mpileup.100kbcov.absCN', 
+    threads: 1
+    log:
+        "logs/{id}.abscn_step2.log"
+    run:
+        acf, ploidy = parse_sequenza_output(input.sequenza_purityploidy)
+        tumor_depth = parse_100kb_stat(input.tumor_100kb_stat)
+        normal_depth = parse_100kb_stat(input.normal_100kb_stat)
+        shell("({input.python2} {input.calculate_abscn} {input.tumor_100kb_cov} {input.normal_100kb_cov} {tumor_depth} {normal_depth} {acf} {ploidy}) &> {log}")
+
+
+def get_all_Bam():
+    with open('sampleConfig.yaml', 'r') as stream:
+        data_loaded = yaml.load(stream)
+    all_list = [] 
+    for id, tn in data_loaded['id'].items():
+        normalBam = os.path.join('dna_bam/', tn['normal'] + '.bam')
+        tumorBam = os.path.join('dna_bam/', tn['tumor'] + '.bam')
+
+        all_list.append(normalBam)
+        all_list.append(tumorBam)
+
+    return list(set(all_list))
+
+rule freebayes_parallel:
+    input:
+        inputbams=get_all_Bam(),
+        freebayes_parallel = config['freebayes_parallel'],
+        ref = config['reference'],
+        fasta_generate_regions = config['fasta_generate_regions'], 
+        vt = config['vt'], 
+        vcfallelicprimitives = config['vcfallelicprimitives'], 
+
+    output:
+        population = 'data_processing/freebayes/population.txt',
+        combined_vcf = "data_processing/freebayes/freebayes.vcf",
+        decomposed_vcf = "data_processing/freebayes/freebayes.decomposed.vcf",
+        normalized_vcf = "data_processing/freebayes/freebayes.decomposed.normalized.vcf",
+    threads: 12
+    log:
+        freebayes = "logs/freebayes.log", 
+        allelicprimitives = "logs/freebayes_allelicprimitives.log", 
+        vt_normalize = "logs/freebayes_vt_normalize.log"
+    run:
+        input_string = ['-b ' + bam for bam in input.inputbams]
+        input_bams = " ".join(input_string)
+        # write population file to avoid assuming these individuals are coming from a population. 
+        with open(output.population, 'w') as f:
+            count = 0
+            for bam in input.inputbams:
+                samplename =  sampleNameBam(bam)
+                if count == 0:
+                    f.write(f'{samplename}\t{samplename}')
+                else:
+                    f.write(f'\n{samplename}\t{samplename}')
+
+                count += 1
+
+        shell("({input.freebayes_parallel} <({input.fasta_generate_regions} {input.ref} 100000) {threads} -f {input.ref} \
+         --populations {output.population} \
+         -m 1 -q 20 -R 0 -S 0 --min-coverage 10 -F 0.2 -C 2 --ploidy 2 {input_bams} > {output.combined_vcf}) \
+        &> {log.freebayes}")
+        shell("({input.vcfallelicprimitives} -kg {output.combined_vcf} > {output.decomposed_vcf}) &> {log.allelicprimitives} ")
+        shell("({input.vt} normalize -r {input.ref} {output.decomposed_vcf} > {output.normalized_vcf}) &> {log.vt_normalize}")
+
+
+rule combine:
+    input:
+        expand("dna_bam/{sample}.bam", sample=SAMPLES) + expand('data_processing/mutect/{id}.mutect.vcf', id=config['id']) + \
+        expand('data_processing/manta/{id}/results/variants/somaticSV.vcf.gz', id=config['id']) + \
+        expand('data_processing/strelka/{id}/results/variants/somatic.snvs.vcf.gz', id=config['id']) + \
+        expand('data_processing/sequenza/{id}/{id}_genome_view.pdf', id=config['id']) + \
+        expand('data_processing/delly/initial_call/{id}.bcf', id=config['id']) + \
+        expand('data_processing/delly/genotyped/{id}.somatic.vcf.gz', id=config['id']) + \
+        expand('data_processing/mpileup/{id}.bam.mpileup.100kbcov.absCN', id=config['id']) + \
+        ["data_processing/freebayes/freebayes.decomposed.normalized.vcf"]
+    output:
+        "done"
+    shell:
+        "touch {output}"
+
